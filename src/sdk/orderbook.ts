@@ -6,6 +6,7 @@ import type {
 import type { MidPrice, PriceCallback } from "../types.js";
 import { log } from "../utils/logger.js";
 
+const RECONNECT_DELAY_MS = 3000;
 const STALE_THRESHOLD_MS = 60_000; // Consider stale after 60s without update
 const STALE_CHECK_INTERVAL_MS = 10_000;
 const MAX_LEVELS = 100; // Only keep top N levels (we only need BBO)
@@ -113,6 +114,7 @@ export class ZoOrderbookStream {
 	private lastUpdateTime = 0;
 	private isClosing = false;
 	private staleCheckInterval: NodeJS.Timeout | null = null;
+	private reconnectTimeout: NodeJS.Timeout | null = null;
 	private snapshotLoaded = false;
 	private deltaBuffer: unknown[] = []; // Buffer deltas until snapshot is loaded
 
@@ -138,6 +140,24 @@ export class ZoOrderbookStream {
 
 		// 1. Subscribe to WebSocket FIRST (buffer messages until snapshot loaded)
 		this.subscription = this.nord.subscribeOrderbook(this.symbol);
+		this.setupEventHandlers();
+
+		// 2. Fetch snapshot via REST
+		await this.fetchSnapshot();
+
+		// 3. Apply buffered deltas that come after snapshot
+		this.applyBufferedDeltas();
+
+		// Start staleness monitoring
+		this.startStaleCheck();
+
+		log.info(
+			`Zo orderbook active (${this.bids.size()} bids, ${this.asks.size()} asks)`,
+		);
+	}
+
+	private setupEventHandlers(): void {
+		if (!this.subscription) return;
 
 		this.subscription.on("message", (data: unknown) => {
 			this.lastUpdateTime = Date.now();
@@ -153,18 +173,18 @@ export class ZoOrderbookStream {
 			log.error("Zo orderbook error:", err.message);
 		});
 
-		// 2. Fetch snapshot via REST
-		await this.fetchSnapshot();
-
-		// 3. Apply buffered deltas that come after snapshot
-		this.applyBufferedDeltas();
-
-		// Start staleness monitoring
-		this.startStaleCheck();
-
-		log.info(
-			`Zo orderbook active (${this.bids.size()} bids, ${this.asks.size()} asks)`,
-		);
+		// SDK type doesn't include "close" event but WebSocket may emit it
+		(
+			this.subscription as unknown as {
+				on(event: "close", cb: () => void): void;
+			}
+		).on("close", () => {
+			if (!this.isClosing) {
+				log.warn("Zo orderbook disconnected");
+				this.subscription = null;
+				this.scheduleReconnect();
+			}
+		});
 	}
 
 	private async fetchSnapshot(): Promise<void> {
@@ -207,36 +227,34 @@ export class ZoOrderbookStream {
 				log.warn(
 					`Zo orderbook stale (${timeSinceUpdate}ms since last update). Reconnecting...`,
 				);
-				void this.reconnect();
+				this.scheduleReconnect();
 			}
 		}, STALE_CHECK_INTERVAL_MS);
 	}
 
-	private async reconnect(): Promise<void> {
-		// Close existing subscription
+	private scheduleReconnect(): void {
+		if (this.reconnectTimeout) return;
+
+		// Close existing subscription immediately
 		if (this.subscription) {
 			this.subscription.close();
 			this.subscription = null;
 		}
 
+		log.info(`Reconnecting to Zo orderbook in ${RECONNECT_DELAY_MS}ms...`);
+		this.reconnectTimeout = setTimeout(() => {
+			this.reconnectTimeout = null;
+			void this.reconnect();
+		}, RECONNECT_DELAY_MS);
+	}
+
+	private async reconnect(): Promise<void> {
 		// Reset state
 		this.resetState();
 
 		// 1. Subscribe to WebSocket FIRST (buffer messages)
 		this.subscription = this.nord.subscribeOrderbook(this.symbol);
-
-		this.subscription.on("message", (data: unknown) => {
-			this.lastUpdateTime = Date.now();
-			if (!this.snapshotLoaded) {
-				this.deltaBuffer.push(data);
-			} else {
-				this.handleUpdate(data);
-			}
-		});
-
-		this.subscription.on("error", (err: Error) => {
-			log.error("Zo orderbook error:", err.message);
-		});
+		this.setupEventHandlers();
 
 		// 2. Fetch fresh snapshot
 		await this.fetchSnapshot();
@@ -378,6 +396,10 @@ export class ZoOrderbookStream {
 
 	close(): void {
 		this.isClosing = true;
+		if (this.reconnectTimeout) {
+			clearTimeout(this.reconnectTimeout);
+			this.reconnectTimeout = null;
+		}
 		if (this.staleCheckInterval) {
 			clearInterval(this.staleCheckInterval);
 			this.staleCheckInterval = null;

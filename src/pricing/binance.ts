@@ -5,6 +5,8 @@ import { log } from "../utils/logger.js";
 const BINANCE_FUTURES_WS = "wss://fstream.binance.com/ws";
 const PING_INTERVAL_MS = 30_000; // Send ping every 30s
 const PONG_TIMEOUT_MS = 10_000; // Expect pong within 10s
+const STALE_THRESHOLD_MS = 60_000; // Consider stale after 60s without message
+const STALE_CHECK_INTERVAL_MS = 10_000;
 
 export type { MidPrice } from "../types.js";
 
@@ -14,6 +16,8 @@ export class BinancePriceFeed {
 	private reconnectTimeout: NodeJS.Timeout | null = null;
 	private pingInterval: NodeJS.Timeout | null = null;
 	private pongTimeout: NodeJS.Timeout | null = null;
+	private staleCheckInterval: NodeJS.Timeout | null = null;
+	private lastMessageTime = 0;
 	private isClosing = false;
 	private readonly wsUrl: string;
 
@@ -33,10 +37,13 @@ export class BinancePriceFeed {
 
 		this.ws.on("open", () => {
 			log.info("Binance connected");
+			this.lastMessageTime = Date.now();
 			this.startPingInterval();
+			this.startStaleCheck();
 		});
 
 		this.ws.on("message", (data: Buffer) => {
+			this.lastMessageTime = Date.now();
 			try {
 				const msg = JSON.parse(data.toString()) as {
 					b: string; // best bid
@@ -122,7 +129,33 @@ export class BinancePriceFeed {
 	private cleanup(): void {
 		this.stopPingInterval();
 		this.clearPongTimeout();
+		this.stopStaleCheck();
 		this.ws = null;
+	}
+
+	private startStaleCheck(): void {
+		this.stopStaleCheck();
+
+		this.staleCheckInterval = setInterval(() => {
+			if (this.isClosing) return;
+
+			const now = Date.now();
+			const timeSinceMessage = now - this.lastMessageTime;
+
+			if (this.lastMessageTime > 0 && timeSinceMessage > STALE_THRESHOLD_MS) {
+				log.warn(
+					`Binance stale (${timeSinceMessage}ms since last message). Reconnecting...`,
+				);
+				this.ws?.terminate();
+			}
+		}, STALE_CHECK_INTERVAL_MS);
+	}
+
+	private stopStaleCheck(): void {
+		if (this.staleCheckInterval) {
+			clearInterval(this.staleCheckInterval);
+			this.staleCheckInterval = null;
+		}
 	}
 
 	private scheduleReconnect(): void {

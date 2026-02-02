@@ -1,6 +1,8 @@
 import type { Nord, NordUser, WebSocketAccountUpdate } from "@n1xyz/nord-ts";
 import { log } from "../utils/logger.js";
 
+const RECONNECT_DELAY_MS = 3000;
+
 // Tracked order from WebSocket
 export interface TrackedOrder {
 	orderId: string;
@@ -27,6 +29,7 @@ export class AccountStream {
 	private orders = new Map<string, TrackedOrder>();
 	private onFill: FillCallback | null = null;
 	private isClosing = false;
+	private reconnectTimeout: NodeJS.Timeout | null = null;
 
 	// For re-sync on reconnect
 	private user: NordUser | null = null;
@@ -46,6 +49,13 @@ export class AccountStream {
 		log.info(`Subscribing to account updates (${this.accountId})...`);
 
 		this.subscription = this.nord.subscribeAccount(this.accountId);
+		this.setupEventHandlers();
+
+		log.info("Account subscription active");
+	}
+
+	private setupEventHandlers(): void {
+		if (!this.subscription) return;
 
 		this.subscription.on("message", (data: WebSocketAccountUpdate) => {
 			this.handleUpdate(data);
@@ -57,13 +67,21 @@ export class AccountStream {
 
 		this.subscription.on("close", () => {
 			if (!this.isClosing) {
-				log.warn("Account stream disconnected. Reconnecting...");
+				log.warn("Account stream disconnected");
 				this.subscription = null;
-				void this.reconnect();
+				this.scheduleReconnect();
 			}
 		});
+	}
 
-		log.info("Account subscription active");
+	private scheduleReconnect(): void {
+		if (this.reconnectTimeout) return;
+
+		log.info(`Reconnecting to account stream in ${RECONNECT_DELAY_MS}ms...`);
+		this.reconnectTimeout = setTimeout(() => {
+			this.reconnectTimeout = null;
+			void this.reconnect();
+		}, RECONNECT_DELAY_MS);
 	}
 
 	private async reconnect(): Promise<void> {
@@ -80,22 +98,7 @@ export class AccountStream {
 
 		// Reconnect
 		this.subscription = this.nord.subscribeAccount(this.accountId);
-
-		this.subscription.on("message", (data: WebSocketAccountUpdate) => {
-			this.handleUpdate(data);
-		});
-
-		this.subscription.on("error", (err: Error) => {
-			log.error("Account WebSocket error:", err.message);
-		});
-
-		this.subscription.on("close", () => {
-			if (!this.isClosing) {
-				log.warn("Account stream disconnected. Reconnecting...");
-				this.subscription = null;
-				void this.reconnect();
-			}
-		});
+		this.setupEventHandlers();
 
 		log.info("Account stream reconnected");
 	}
@@ -180,6 +183,10 @@ export class AccountStream {
 
 	close(): void {
 		this.isClosing = true;
+		if (this.reconnectTimeout) {
+			clearTimeout(this.reconnectTimeout);
+			this.reconnectTimeout = null;
+		}
 		if (this.subscription) {
 			this.subscription.close();
 			this.subscription = null;
