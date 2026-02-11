@@ -60,7 +60,7 @@ export class MarketMaker {
 	private marketSymbol = "";
 	private accountStream: AccountStream | null = null;
 	private orderbookStream: ZoOrderbookStream | null = null;
-	private binanceFeed: BinancePriceFeed | null = null;
+	private referenceFeed: BinancePriceFeed | null = null;
 	private fairPriceCalc: FairPriceProvider | null = null;
 	private positionTracker: PositionTracker | null = null;
 	private quoter: Quoter | null = null;
@@ -148,7 +148,7 @@ export class MarketMaker {
 		// Initialize streams
 		this.accountStream = new AccountStream(nord, accountId);
 		this.orderbookStream = new ZoOrderbookStream(nord, this.marketSymbol);
-		this.binanceFeed = new BinancePriceFeed(binanceSymbol);
+		this.referenceFeed = new BinancePriceFeed(binanceSymbol);
 
 		this.isRunning = true;
 	}
@@ -168,8 +168,8 @@ export class MarketMaker {
 		});
 
 		// Price feeds
-		if (this.binanceFeed) {
-			this.binanceFeed.onPrice = (price) => this.handleBinancePrice(price);
+		if (this.referenceFeed) {
+			this.referenceFeed.onPrice = (price) => this.handleRefPrice(price);
 		}
 		if (this.orderbookStream) {
 			this.orderbookStream.onPrice = (price) => this.handleZoPrice(price);
@@ -178,23 +178,23 @@ export class MarketMaker {
 		// Start connections
 		this.accountStream?.connect();
 		this.orderbookStream?.connect();
-		this.binanceFeed?.connect();
+		this.referenceFeed?.connect();
 	}
 
-	private handleBinancePrice(binancePrice: MidPrice): void {
+	private handleRefPrice(refPrice: MidPrice): void {
 		const zoPrice = this.orderbookStream?.getMidPrice();
 		if (
 			zoPrice &&
-			Math.abs(binancePrice.timestamp - zoPrice.timestamp) < 1000
+			Math.abs(refPrice.timestamp - zoPrice.timestamp) < 1000
 		) {
-			this.fairPriceCalc?.addSample(zoPrice.mid, binancePrice.mid);
+			this.fairPriceCalc?.addSample(zoPrice.mid, refPrice.mid);
 		}
 
 		if (!this.isRunning) return;
 
-		const fairPrice = this.fairPriceCalc?.getFairPrice(binancePrice.mid);
+		const fairPrice = this.fairPriceCalc?.getFairPrice(refPrice.mid);
 		if (!fairPrice) {
-			this.logWarmupProgress(binancePrice);
+			this.logWarmupProgress(refPrice);
 			return;
 		}
 
@@ -208,27 +208,27 @@ export class MarketMaker {
 	}
 
 	private handleZoPrice(zoPrice: MidPrice): void {
-		const binancePrice = this.binanceFeed?.getMidPrice();
+		const refPrice = this.referenceFeed?.getMidPrice();
 		if (
-			binancePrice &&
-			Math.abs(zoPrice.timestamp - binancePrice.timestamp) < 1000
+			refPrice &&
+			Math.abs(zoPrice.timestamp - refPrice.timestamp) < 1000
 		) {
-			this.fairPriceCalc?.addSample(zoPrice.mid, binancePrice.mid);
+			this.fairPriceCalc?.addSample(zoPrice.mid, refPrice.mid);
 		}
 	}
 
-	private logWarmupProgress(binancePrice: MidPrice): void {
+	private logWarmupProgress(refPrice: MidPrice): void {
 		const state = this.fairPriceCalc?.getState();
 		if (!state || state.samples === this.lastLoggedSampleCount) return;
 
 		this.lastLoggedSampleCount = state.samples;
 		const zoPrice = this.orderbookStream?.getMidPrice();
 		const offsetBps =
-			state.offset !== null && binancePrice.mid > 0
-				? ((state.offset / binancePrice.mid) * 10000).toFixed(1)
+			state.offset !== null && refPrice.mid > 0
+				? ((state.offset / refPrice.mid) * 10000).toFixed(1)
 				: "--";
 		log.info(
-			`Warming up: ${state.samples}/${this.config.warmupSeconds} samples | Binance $${binancePrice.mid.toFixed(2)} | 01 $${zoPrice?.mid.toFixed(2) ?? "--"} | Offset ${offsetBps}bps`,
+			`Warming up: ${state.samples}/${this.config.warmupSeconds} samples | Binance $${refPrice.mid.toFixed(2)} | 01 $${zoPrice?.mid.toFixed(2) ?? "--"} | Offset ${offsetBps}bps`,
 		);
 	}
 
@@ -285,7 +285,7 @@ export class MarketMaker {
 			this.orderSyncInterval = null;
 		}
 
-		this.binanceFeed?.close();
+		this.referenceFeed?.close();
 		this.orderbookStream?.close();
 		this.accountStream?.close();
 

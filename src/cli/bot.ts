@@ -1,5 +1,6 @@
 // CLI entry point for market maker bot
 
+import "../utils/polyfills.js";
 import "dotenv/config";
 import { DEFAULT_CONFIG } from "../bots/mm/config.js";
 import { MarketMaker } from "../bots/mm/index.js";

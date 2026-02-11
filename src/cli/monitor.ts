@@ -1,7 +1,9 @@
 // Unified Market Monitor CLI
 // Combines orderbook and pricing views using blessed TUI
 
+import "../utils/polyfills.js";
 import "dotenv/config";
+import type { NordUser } from "@n1xyz/nord-ts";
 import { Nord } from "@n1xyz/nord-ts";
 import { Connection } from "@solana/web3.js";
 import blessed from "blessed";
@@ -10,6 +12,8 @@ import {
 	FairPriceCalculator,
 	type FairPriceConfig,
 } from "../pricing/fair-price.js";
+import { AccountStream, type FillEvent } from "../sdk/account.js";
+import { createZoClient } from "../sdk/client.js";
 import { ZoOrderbookStream } from "../sdk/orderbook.js";
 import { log } from "../utils/logger.js";
 
@@ -18,7 +22,9 @@ const FAIR_PRICE_MIN_SAMPLES = 10;
 const STATS_WINDOW_MS = 60_000;
 const ORDERBOOK_DEPTH = 10;
 const MAX_TRADES = 100;
+const MAX_FILLS = 20;
 const RENDER_INTERVAL_MS = 100;
+const POSITION_SYNC_INTERVAL_MS = 30_000;
 
 interface PriceState {
 	mid: number;
@@ -76,20 +82,44 @@ class MarketMonitor {
 	private sizeDecimals = 4;
 	private restoreConsole: (() => void) | null = null;
 
-	constructor(private readonly targetSymbol: string) {}
+	// Account state (optional, only when PRIVATE_KEY is present)
+	private user: NordUser | null = null;
+	private accountId: number | null = null;
+	private accountStream: AccountStream | null = null;
+	private marketId = 0;
+	private accountBox: blessed.Widgets.BoxElement | null = null;
+	private positionSize = 0;
+	private positionPrice = 0;
+	private recentFills: FillEvent[] = [];
+	private positionSyncInterval: ReturnType<typeof setInterval> | null = null;
+	private readonly hasAccount: boolean;
+
+	constructor(private readonly targetSymbol: string) {
+		this.hasAccount = !!process.env.PRIVATE_KEY;
+	}
 
 	async run(): Promise<void> {
 		this.initScreen();
 		this.addLog("Connecting to 01 Exchange...");
 
-		const rpcUrl = process.env.RPC_URL || "https://api.mainnet-beta.solana.com";
-		const connection = new Connection(rpcUrl, "confirmed");
+		const privateKey = process.env.PRIVATE_KEY;
 
-		this.nord = await Nord.new({
-			webServerUrl: "https://zo-mainnet.n1.xyz",
-			app: "zoau54n5U24GHNKqyoziVaVxgsiQYnPMx33fKmLLCT5",
-			solanaConnection: connection,
-		});
+		if (privateKey) {
+			this.addLog("PRIVATE_KEY detected, enabling account features...");
+			const client = await createZoClient(privateKey);
+			this.nord = client.nord;
+			this.user = client.user;
+			this.accountId = client.accountId;
+		} else {
+			const rpcUrl =
+				process.env.RPC_URL || "https://api.mainnet-beta.solana.com";
+			const connection = new Connection(rpcUrl, "confirmed");
+			this.nord = await Nord.new({
+				webServerUrl: "https://zo-mainnet.n1.xyz",
+				app: "zoau54n5U24GHNKqyoziVaVxgsiQYnPMx33fKmLLCT5",
+				solanaConnection: connection,
+			});
+		}
 
 		// Find market
 		const market = this.nord.markets.find((m) =>
@@ -105,6 +135,7 @@ class MarketMonitor {
 
 		this.priceDecimals = market.priceDecimals;
 		this.sizeDecimals = market.sizeDecimals;
+		this.marketId = market.marketId;
 
 		// Derive Binance symbol
 		const baseSymbol = market.symbol
@@ -151,6 +182,11 @@ class MarketMonitor {
 			this.handleTradesUpdate(data);
 		});
 
+		// Setup account features if authenticated
+		if (this.user && this.accountId !== null) {
+			await this.initAccountFeatures();
+		}
+
 		// Start connections
 		this.binanceFeed.connect();
 		await this.zoOrderbook.connect();
@@ -159,6 +195,79 @@ class MarketMonitor {
 
 		// Keep alive
 		await new Promise(() => {});
+	}
+
+	private async initAccountFeatures(): Promise<void> {
+		if (!this.user || this.accountId === null) return;
+
+		await this.user.fetchInfo();
+		this.syncPositionFromServer();
+
+		this.accountStream = new AccountStream(this.nord, this.accountId);
+		this.accountStream.syncOrders(this.user, this.accountId);
+		this.accountStream.setOnFill((fill: FillEvent) => {
+			if (fill.marketId === this.marketId) {
+				if (fill.side === "bid") {
+					this.positionSize += fill.size;
+				} else {
+					this.positionSize -= fill.size;
+				}
+				this.recentFills.unshift(fill);
+				if (this.recentFills.length > MAX_FILLS) {
+					this.recentFills.length = MAX_FILLS;
+				}
+				this.addLog(
+					`FILL: ${fill.side === "bid" ? "BUY" : "SELL"} ${fill.size.toFixed(this.sizeDecimals)} @ $${this.formatPrice(fill.price)}`,
+				);
+				this.scheduleRender();
+			}
+		});
+		this.accountStream.connect();
+
+		this.positionSyncInterval = setInterval(() => {
+			this.syncPositionFromServer();
+		}, POSITION_SYNC_INTERVAL_MS);
+
+		this.addLog(
+			`Account active. Position: ${this.positionSize === 0 ? "flat" : this.positionSize.toFixed(this.sizeDecimals)}`,
+		);
+	}
+
+	private syncPositionFromServer(): void {
+		if (!this.user || this.accountId === null) return;
+
+		this.user
+			.fetchInfo()
+			.then(() => {
+				const positions =
+					(this.user as NordUser).positions[this.accountId as number] || [];
+				const pos = positions.find(
+					(p: { marketId: number }) => p.marketId === this.marketId,
+				);
+				if (
+					pos?.perp &&
+					typeof pos.perp === "object" &&
+					"isLong" in pos.perp &&
+					"baseSize" in pos.perp
+				) {
+					const perp = pos.perp as {
+						isLong: boolean;
+						baseSize: number;
+						price: number;
+					};
+					this.positionSize = perp.isLong
+						? perp.baseSize
+						: -perp.baseSize;
+					this.positionPrice = perp.price;
+				} else {
+					this.positionSize = 0;
+					this.positionPrice = 0;
+				}
+				this.scheduleRender();
+			})
+			.catch((err: unknown) => {
+				this.addLog(`Position sync error: ${err}`);
+			});
 	}
 
 	private initScreen(): void {
@@ -206,13 +315,13 @@ class MarketMonitor {
 			},
 		});
 
-		// Pricing panel (top left, compact)
+		// Pricing panel (top left)
 		this.pricingBox = blessed.box({
 			parent: this.screen,
 			top: 3,
 			left: 0,
 			width: "20%",
-			height: "60%-3",
+			height: this.hasAccount ? "30%-3" : "60%-3",
 			label: " Pricing ",
 			border: { type: "line" },
 			tags: true,
@@ -220,6 +329,29 @@ class MarketMonitor {
 				border: { fg: "cyan" },
 			},
 		});
+
+		// Account panel (below pricing, only when authenticated)
+		if (this.hasAccount) {
+			this.accountBox = blessed.box({
+				parent: this.screen,
+				top: "30%",
+				left: 0,
+				width: "20%",
+				height: "30%",
+				label: " Account ",
+				border: { type: "line" },
+				tags: true,
+				scrollable: true,
+				alwaysScroll: true,
+				scrollbar: {
+					ch: " ",
+					style: { bg: "yellow" },
+				},
+				style: {
+					border: { fg: "yellow" },
+				},
+			});
+		}
 
 		// Orderbook panel (top center)
 		this.orderbookBox = blessed.box({
@@ -393,6 +525,7 @@ class MarketMonitor {
 		this.renderPricing();
 		this.renderOrderbook();
 		this.renderTrades();
+		this.renderAccount();
 		this.screen.render();
 	}
 
@@ -444,6 +577,78 @@ class MarketMonitor {
 		}
 
 		this.pricingBox.setContent(lines.join("\n"));
+	}
+
+	private renderAccount(): void {
+		if (!this.accountBox) return;
+
+		const lines: string[] = [];
+
+		// Position
+		if (this.positionSize === 0) {
+			lines.push(" {gray-fg}No position{/gray-fg}");
+		} else {
+			const isLong = this.positionSize > 0;
+			const dir = isLong
+				? "{green-fg}LONG{/green-fg}"
+				: "{red-fg}SHORT{/red-fg}";
+			const size = Math.abs(this.positionSize).toFixed(this.sizeDecimals);
+			const midPrice = this.zoPrice?.mid ?? this.positionPrice;
+			const usdValue = Math.abs(this.positionSize * midPrice);
+			lines.push(` ${dir} ${size}`);
+			lines.push(` $${this.formatUsd(usdValue)} @ $${this.formatPrice(this.positionPrice)}`);
+		}
+
+		lines.push("");
+
+		// Active orders
+		const marketOrders =
+			this.accountStream?.getOrdersForMarket(this.marketId) ?? [];
+		const bids = marketOrders
+			.filter((o) => o.side === "bid")
+			.sort((a, b) => b.price - a.price);
+		const asks = marketOrders
+			.filter((o) => o.side === "ask")
+			.sort((a, b) => a.price - b.price);
+
+		if (bids.length === 0 && asks.length === 0) {
+			lines.push(" {gray-fg}No orders{/gray-fg}");
+		} else {
+			lines.push(" {bold}Orders:{/bold}");
+			for (const ask of asks) {
+				lines.push(
+					`  {red-fg}A $${this.formatPrice(ask.price)} x${ask.size.toFixed(this.sizeDecimals)}{/red-fg}`,
+				);
+			}
+			for (const bid of bids) {
+				lines.push(
+					`  {green-fg}B $${this.formatPrice(bid.price)} x${bid.size.toFixed(this.sizeDecimals)}{/green-fg}`,
+				);
+			}
+		}
+
+		// Recent fills
+		if (this.recentFills.length > 0) {
+			lines.push("");
+			lines.push(" {bold}Fills:{/bold}");
+			const displayFills = this.recentFills.slice(0, 5);
+			for (const f of displayFills) {
+				const side =
+					f.side === "bid"
+						? "{green-fg}BUY{/green-fg}"
+						: "{red-fg}SELL{/red-fg}";
+				lines.push(
+					`  ${side} ${f.size.toFixed(this.sizeDecimals)} @ $${this.formatPrice(f.price)}`,
+				);
+			}
+			if (this.recentFills.length > 5) {
+				lines.push(
+					`  {gray-fg}+${this.recentFills.length - 5} more{/gray-fg}`,
+				);
+			}
+		}
+
+		this.accountBox.setContent(lines.join("\n"));
 	}
 
 	private renderOrderbook(): void {
@@ -546,6 +751,10 @@ class MarketMonitor {
 		this.restoreConsole?.();
 		this.binanceFeed?.close();
 		this.zoOrderbook?.close();
+		this.accountStream?.close();
+		if (this.positionSyncInterval) {
+			clearInterval(this.positionSyncInterval);
+		}
 		this.screen.destroy();
 		process.exit(0);
 	}
