@@ -54,6 +54,12 @@ Edit the `.env` file and add your private key:
 PRIVATE_KEY=your_base58_private_key_here
 ```
 
+If you see a Solana RPC error like `403 Forbidden` (`Your IP or provider is blocked from this endpoint`), set a private RPC provider:
+
+```
+RPC_URL=https://your-solana-rpc-endpoint
+```
+
 ---
 
 ## Step 3: DNS Setup (Important for Some Regions)

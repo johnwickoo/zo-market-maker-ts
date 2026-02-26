@@ -78,15 +78,25 @@ function extractPlacedOrders(
 	return orders;
 }
 
-// Execute atomic operations in chunks of MAX_ATOMIC_ACTIONS
+// Result of executeAtomic — includes placed orders and whether any chunks failed.
+export interface AtomicExecResult {
+	orders: CachedOrder[];
+	hadChunkErrors: boolean;
+}
+
+// Execute atomic operations in chunks of MAX_ATOMIC_ACTIONS.
+// Errors per-chunk are caught and logged — remaining chunks still execute.
+// This prevents a single POST_ONLY or ORDER_NOT_FOUND from aborting the
+// entire cancel+place sequence, which would leave stale/orphaned orders.
 async function executeAtomic(
 	user: NordUser,
 	actions: UserAtomicSubaction[],
-): Promise<CachedOrder[]> {
-	if (actions.length === 0) return [];
+): Promise<AtomicExecResult> {
+	if (actions.length === 0) return { orders: [], hadChunkErrors: false };
 
 	const allOrders: CachedOrder[] = [];
 	const totalChunks = Math.ceil(actions.length / MAX_ATOMIC_ACTIONS);
+	let hadChunkErrors = false;
 
 	for (let i = 0; i < actions.length; i += MAX_ATOMIC_ACTIONS) {
 		const chunkIdx = Math.floor(i / MAX_ATOMIC_ACTIONS) + 1;
@@ -96,16 +106,33 @@ async function executeAtomic(
 			`ATOMIC [${chunkIdx}/${totalChunks}]: ${chunk.map(formatAction).join(" ")}`,
 		);
 
-		const result = (await user.atomic(chunk)) as AtomicResult;
-		const placed = extractPlacedOrders(result, chunk);
-		allOrders.push(...placed);
+		try {
+			const result = (await user.atomic(chunk)) as AtomicResult;
+			const placed = extractPlacedOrders(result, chunk);
+			allOrders.push(...placed);
 
-		if (placed.length > 0) {
-			log.debug(`ATOMIC: placed [${placed.map((o) => o.orderId).join(", ")}]`);
+			if (placed.length > 0) {
+				log.debug(`ATOMIC: placed [${placed.map((o) => o.orderId).join(", ")}]`);
+			}
+		} catch (err) {
+			hadChunkErrors = true;
+			const errMsg = err instanceof Error ? err.message : String(err);
+			if (errMsg.includes("POST_ONLY") || errMsg.includes("MUST_NOT_FILL")) {
+				log.warn(`ATOMIC [${chunkIdx}/${totalChunks}]: PostOnly crossed — skipping chunk, continuing.`);
+			} else if (errMsg.includes("ORDER_NOT_FOUND")) {
+				log.warn(`ATOMIC [${chunkIdx}/${totalChunks}]: Stale order ID — skipping chunk, continuing.`);
+			} else if (errMsg.includes("reason: undefined") || errMsg.includes("Atomic operation failed")) {
+				// Exchange returned an error without a reason — treat as transient.
+				// Common during high-frequency updates when exchange state is mid-transition.
+				log.warn(`ATOMIC [${chunkIdx}/${totalChunks}]: Exchange error (${errMsg.slice(-60)}) — skipping chunk, continuing.`);
+			} else {
+				// Truly unknown error — rethrow so the caller can handle it
+				throw err;
+			}
 		}
 	}
 
-	return allOrders;
+	return { orders: allOrders, hadChunkErrors };
 }
 
 // Build place action from quote
@@ -140,13 +167,19 @@ function orderMatchesQuote(order: CachedOrder, quote: Quote): boolean {
 	);
 }
 
+// Result of updateQuotes — includes new active orders and whether any chunks failed.
+export interface UpdateQuotesResult {
+	orders: CachedOrder[];
+	hadChunkErrors: boolean;
+}
+
 // Update quotes: only cancel/place if changed
 export async function updateQuotes(
 	user: NordUser,
 	marketId: number,
 	currentOrders: CachedOrder[],
 	newQuotes: Quote[],
-): Promise<CachedOrder[]> {
+): Promise<UpdateQuotesResult> {
 	const keptOrders: CachedOrder[] = [];
 	const ordersToCancel: CachedOrder[] = [];
 	const quotesToPlace: Quote[] = [];
@@ -172,17 +205,17 @@ export async function updateQuotes(
 
 	// Skip if nothing to do
 	if (ordersToCancel.length === 0 && quotesToPlace.length === 0) {
-		return currentOrders;
+		return { orders: currentOrders, hadChunkErrors: false };
 	}
 
-	// Build actions: cancels first, then places
-	const actions: UserAtomicSubaction[] = [
-		...ordersToCancel.map((o) => buildCancelAction(o.orderId)),
-		...quotesToPlace.map((q) => buildPlaceAction(marketId, q)),
-	];
+	// Cancels first, then places. This isolates stale cancel IDs in early
+	// chunks so they don't take down place actions in the same chunk.
+	const cancelActions = ordersToCancel.map((o) => buildCancelAction(o.orderId));
+	const placeActions = quotesToPlace.map((q) => buildPlaceAction(marketId, q));
+	const actions: UserAtomicSubaction[] = [...cancelActions, ...placeActions];
 
-	const placedOrders = await executeAtomic(user, actions);
-	return [...keptOrders, ...placedOrders];
+	const result = await executeAtomic(user, actions);
+	return { orders: [...keptOrders, ...result.orders], hadChunkErrors: result.hadChunkErrors };
 }
 
 // Cancel orders

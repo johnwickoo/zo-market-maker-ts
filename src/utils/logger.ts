@@ -74,7 +74,7 @@ export const log = {
 		ask: number | null,
 		fair: number,
 		spreadBps: number,
-		mode: "normal" | "close",
+		mode: "normal" | "close" | "enhanced",
 	): void {
 		const bidStr = bid !== null ? `$${bid.toFixed(2)}` : "--";
 		const askStr = ask !== null ? `$${ask.toFixed(2)}` : "--";

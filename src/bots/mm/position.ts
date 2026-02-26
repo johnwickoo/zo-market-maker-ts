@@ -27,22 +27,22 @@ export class PositionTracker {
 
 	constructor(private readonly config: PositionConfig) {}
 
-	startSync(user: NordUser, accountId: number, marketId: number): void {
+	async startSync(user: NordUser, accountId: number, marketId: number): Promise<number> {
 		this.isRunning = true;
-		this.syncLoop(user, accountId, marketId);
+		await this.syncFromServer(user, accountId, marketId);
+		this.continueSyncLoop(user, accountId, marketId);
+		return this.baseSize;
 	}
 
 	stopSync(): void {
 		this.isRunning = false;
 	}
 
-	private async syncLoop(
+	private async continueSyncLoop(
 		user: NordUser,
 		accountId: number,
 		marketId: number,
 	): Promise<void> {
-		await this.syncFromServer(user, accountId, marketId);
-
 		while (this.isRunning) {
 			await this.sleep(this.config.syncIntervalMs);
 			if (!this.isRunning) break;
@@ -59,26 +59,38 @@ export class PositionTracker {
 		accountId: number,
 		marketId: number,
 	): Promise<void> {
-		try {
-			await user.fetchInfo();
+		const maxRetries = 3;
+		const baseDelay = 500;
 
-			const positions = user.positions[accountId] || [];
-			const pos = positions.find((p) => p.marketId === marketId);
+		for (let attempt = 0; attempt <= maxRetries; attempt++) {
+			try {
+				await user.fetchInfo();
 
-			const serverSize = pos?.perp
-				? pos.perp.isLong
-					? pos.perp.baseSize
-					: -pos.perp.baseSize
-				: 0;
+				const positions = user.positions[accountId] || [];
+				const pos = positions.find((p) => p.marketId === marketId);
 
-			if (Math.abs(this.baseSize - serverSize) > 0.0001) {
-				log.warn(
-					`Position drift: local=${this.baseSize.toFixed(6)}, server=${serverSize.toFixed(6)}`,
-				);
-				this.baseSize = serverSize;
+				const serverSize = pos?.perp
+					? pos.perp.isLong
+						? pos.perp.baseSize
+						: -pos.perp.baseSize
+					: 0;
+
+				if (Math.abs(this.baseSize - serverSize) > 0.0001) {
+					log.warn(
+						`Position drift: local=${this.baseSize.toFixed(6)}, server=${serverSize.toFixed(6)}`,
+					);
+					this.baseSize = serverSize;
+				}
+				return;
+			} catch (err) {
+				if (attempt < maxRetries) {
+					const backoff = baseDelay * 2 ** attempt;
+					log.warn(`Position sync failed (attempt ${attempt + 1}/${maxRetries + 1}) — retrying in ${backoff}ms`);
+					await this.sleep(backoff);
+				} else {
+					log.error("Position sync failed after retries:", err);
+				}
 			}
-		} catch (err) {
-			log.error("Position sync error:", err);
 		}
 	}
 

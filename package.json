@@ -7,6 +7,7 @@
   "scripts": {
     "build": "tsc",
     "bot": "node --import tsx src/cli/bot.ts",
+    "analyze": "node --import tsx src/cli/analyze.ts",
     "monitor": "node --import tsx src/cli/monitor.ts",
     "check": "biome check src",
     "format": "biome format --write src",

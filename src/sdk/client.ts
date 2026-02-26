@@ -17,7 +17,16 @@ export interface ZoClient {
 export async function createZoClient(privateKey: string): Promise<ZoClient> {
 	log.info("Connecting to 01 Exchange (mainnet)...");
 
-	const connection = new Connection(MAINNET_CONFIG.rpcUrl, "confirmed");
+	const configuredRpcUrl = process.env.RPC_URL?.trim();
+	const rpcUrl =
+		configuredRpcUrl && configuredRpcUrl.length > 0
+			? configuredRpcUrl
+			: MAINNET_CONFIG.rpcUrl;
+	log.info(
+		`Solana RPC: ${configuredRpcUrl ? "RPC_URL (custom)" : "default public endpoint"}`,
+	);
+
+	const connection = new Connection(rpcUrl, "confirmed");
 
 	const nord = await Nord.new({
 		webServerUrl: MAINNET_CONFIG.webServerUrl,

@@ -192,7 +192,7 @@ services:
 | Variable      | Description                          | Required |
 | ------------- | ------------------------------------ | -------- |
 | `PRIVATE_KEY` | Base58 Solana private key            | Yes      |
-| `RPC_URL`     | Solana RPC endpoint (for monitor)    | No       |
+| `RPC_URL`     | Solana RPC endpoint (bot + monitor)  | No       |
 | `LOG_LEVEL`   | Log level: debug, info, warn, error  | No       |
 
 ## Market Monitor
