@@ -100,12 +100,29 @@ export class MarketMaker {
 	private orderSyncInterval: ReturnType<typeof setInterval> | null = null;
 	private snapshotInterval: ReturnType<typeof setInterval> | null = null;
 
+	// Dedup tracking for high-frequency diagnostic logs (POS, ENHANCED, QUOTE)
+	// Only re-log when content changes or MIN_LOG_INTERVAL_MS has passed.
+	private lastDiagLogs: Record<string, { content: string; time: number }> = {};
+
 	constructor(
 		private readonly config: MarketMakerConfig,
 		private readonly privateKey: string,
 		private readonly riskConfig?: RiskConfig,
 		private readonly enhancedConfig?: EnhancedStrategyConfig,
 	) {}
+
+	private static readonly MIN_LOG_INTERVAL_MS = 1000;
+
+	// Returns true if the log should be emitted (content changed or interval elapsed)
+	private shouldLogDiag(key: string, content: string): boolean {
+		const now = Date.now();
+		const last = this.lastDiagLogs[key];
+		if (last && last.content === content && now - last.time < MarketMaker.MIN_LOG_INTERVAL_MS) {
+			return false;
+		}
+		this.lastDiagLogs[key] = { content, time: now };
+		return true;
+	}
 
 	private requireClient(): ZoClient {
 		if (!this.client) {
@@ -171,6 +188,7 @@ export class MarketMaker {
 			this.config.spreadBps,
 			this.config.takeProfitBps,
 			this.config.orderSizeUsd,
+			this.config.fees,
 		);
 
 		// Enhanced strategy: volatility + momentum + inventory skew
@@ -180,6 +198,7 @@ export class MarketMaker {
 				market.sizeDecimals,
 				this.enhancedConfig.quoter,
 				this.config.orderSizeUsd,
+				this.config.fees,
 			);
 			this.volTracker = new VolatilityTracker(this.enhancedConfig.volatility);
 			this.momentumDetector = new MomentumDetector(this.enhancedConfig.momentum);
@@ -207,6 +226,11 @@ export class MarketMaker {
 		// Account stream - fill events
 		this.accountStream?.syncOrders(user, accountId);
 		this.accountStream?.setOnFill((fill: FillEvent) => {
+			// Ignore fills from other markets on the same account
+			if (fill.marketId !== this.marketId) {
+				log.debug(`Ignoring fill from market ${fill.marketId} (watching ${this.marketId})`);
+				return;
+			}
 			const side = fill.side === "bid" ? "buy" : "sell" as const;
 			log.fill(side, fill.price, fill.size);
 			this.positionTracker?.applyFill(fill.side, fill.size, fill.price);
@@ -342,11 +366,21 @@ export class MarketMaker {
 		const marketOrders = existingOrders.filter(
 			(o) => o.marketId === this.marketId,
 		);
-		this.activeOrders = mapApiOrdersToCached(marketOrders);
+		const staleOrders = mapApiOrdersToCached(marketOrders);
 
-		if (this.activeOrders.length > 0) {
-			log.info(`Synced ${this.activeOrders.length} existing orders`);
+		// Cancel all existing orders on startup — stale orders from a previous
+		// session may be at wildly different prices and get adversely filled
+		// during the warmup period before the bot can reprice them.
+		if (staleOrders.length > 0) {
+			log.info(`Found ${staleOrders.length} existing orders — cancelling to prevent stale fills...`);
+			try {
+				await cancelOrders(user, staleOrders);
+				log.info(`Cancelled ${staleOrders.length} stale orders`);
+			} catch (err) {
+				log.warn("Failed to cancel some stale orders (may already be filled):", err);
+			}
 		}
+		this.activeOrders = [];
 
 		// Start position sync and store initial position for PnL seeding
 		this.initialExchangePosition = await this.positionTracker?.startSync(user, accountId, this.marketId) ?? 0;
@@ -531,13 +565,19 @@ export class MarketMaker {
 
 				quotes = this.enhancedQuoter.getQuotes(enhancedCtx, bbo);
 
-				// Log enhanced diagnostics
+				// Log enhanced diagnostics (throttled — only on change or once/sec)
 				if (posBase !== 0) {
 					const isLong = posBase > 0;
 					const isCloseMode = Math.abs(posUsd) >= this.config.closeThresholdUsd;
-					log.position(posBase, posUsd, isLong, isCloseMode);
+					const posKey = `${posBase.toFixed(6)}|${isLong}|${isCloseMode}`;
+					if (this.shouldLogDiag("pos", posKey)) {
+						log.position(posBase, posUsd, isLong, isCloseMode);
+					}
 				}
-				log.info(`ENHANCED: ${this.enhancedQuoter.diagnose(enhancedCtx)}`);
+				const enhDiag = this.enhancedQuoter.diagnose(enhancedCtx);
+				if (this.shouldLogDiag("enhanced", enhDiag)) {
+					log.info(`ENHANCED: ${enhDiag}`);
+				}
 			} else {
 				// ─── Simple Strategy Path ─────────────────────────────
 				if (!this.quoter) return;
@@ -545,12 +585,15 @@ export class MarketMaker {
 				const { positionState } = quotingCtx;
 
 				if (positionState.sizeBase !== 0) {
-					log.position(
-						positionState.sizeBase,
-						positionState.sizeUsd,
-						positionState.isLong,
-						positionState.isCloseMode,
-					);
+					const posKey = `${positionState.sizeBase.toFixed(6)}|${positionState.isLong}|${positionState.isCloseMode}`;
+					if (this.shouldLogDiag("pos", posKey)) {
+						log.position(
+							positionState.sizeBase,
+							positionState.sizeUsd,
+							positionState.isLong,
+							positionState.isCloseMode,
+						);
+					}
 				}
 
 				quotes = this.quoter.getQuotes(quotingCtx, bbo);
@@ -568,19 +611,23 @@ export class MarketMaker {
 
 			const bid = quotes.find((q) => q.side === "bid");
 			const ask = quotes.find((q) => q.side === "ask");
-			log.quote(
-				bid?.price.toNumber() ?? null,
-				ask?.price.toNumber() ?? null,
-				fairPrice,
-				this.config.spreadBps,
-				this.enhancedQuoter ? "enhanced" : "normal",
-			);
+			const quoteKey = `${bid?.price.toFixed(2) ?? "-"}|${ask?.price.toFixed(2) ?? "-"}|${fairPrice.toFixed(2)}`;
+			if (this.shouldLogDiag("quote", quoteKey)) {
+				log.quote(
+					bid?.price.toNumber() ?? null,
+					ask?.price.toNumber() ?? null,
+					fairPrice,
+					this.config.spreadBps,
+					this.enhancedQuoter ? "enhanced" : "normal",
+				);
+			}
 
 			const result = await updateQuotes(
 				this.client.user,
 				this.marketId,
 				this.activeOrders,
 				quotes,
+				this.config.repriceThresholdBps,
 			);
 			this.activeOrders = result.orders;
 
@@ -633,6 +680,8 @@ export class MarketMaker {
 			"Take Profit": `${this.config.takeProfitBps} bps`,
 			"Order Size": `$${this.config.orderSizeUsd}`,
 			"Close Mode": `>=$${this.config.closeThresholdUsd}`,
+			Fees: `maker ${this.config.fees.makerFeeBps}bps / taker ${this.config.fees.takerFeeBps}bps`,
+			"Reprice Threshold": `${this.config.repriceThresholdBps} bps`,
 		});
 	}
 

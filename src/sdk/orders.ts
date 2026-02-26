@@ -158,7 +158,7 @@ function buildCancelAction(orderId: string): UserAtomicSubaction {
 	};
 }
 
-// Check if order matches quote (same side, price, size)
+// Check if order matches quote exactly (same side, price, size)
 function orderMatchesQuote(order: CachedOrder, quote: Quote): boolean {
 	return (
 		order.side === quote.side &&
@@ -167,30 +167,51 @@ function orderMatchesQuote(order: CachedOrder, quote: Quote): boolean {
 	);
 }
 
+// Check if order is "close enough" to quote — same side, size matches,
+// and price is within thresholdBps. Avoids unnecessary cancel+place churn.
+function orderSimilarToQuote(order: CachedOrder, quote: Quote, thresholdBps: number): boolean {
+	if (order.side !== quote.side) return false;
+	if (!order.size.eq(quote.size)) return false;
+	if (order.price.isZero()) return false;
+	const priceDriftBps = order.price.sub(quote.price).abs().div(order.price).mul(10000).toNumber();
+	return priceDriftBps <= thresholdBps;
+}
+
 // Result of updateQuotes — includes new active orders and whether any chunks failed.
 export interface UpdateQuotesResult {
 	orders: CachedOrder[];
 	hadChunkErrors: boolean;
 }
 
-// Update quotes: only cancel/place if changed
+// Update quotes: only cancel/place if changed (or drifted past threshold)
 export async function updateQuotes(
 	user: NordUser,
 	marketId: number,
 	currentOrders: CachedOrder[],
 	newQuotes: Quote[],
+	repriceThresholdBps = 0,
 ): Promise<UpdateQuotesResult> {
 	const keptOrders: CachedOrder[] = [];
 	const ordersToCancel: CachedOrder[] = [];
 	const quotesToPlace: Quote[] = [];
 
-	// For each new quote, check if matching order exists
+	// For each new quote, check if matching (or similar) order exists
 	for (const quote of newQuotes) {
-		const matchingOrder = currentOrders.find((o) =>
+		const exactMatch = currentOrders.find((o) =>
 			orderMatchesQuote(o, quote),
 		);
-		if (matchingOrder) {
-			keptOrders.push(matchingOrder);
+		if (exactMatch) {
+			keptOrders.push(exactMatch);
+		} else if (repriceThresholdBps > 0) {
+			// Check if an existing order is close enough to keep
+			const similarOrder = currentOrders.find((o) =>
+				!keptOrders.includes(o) && orderSimilarToQuote(o, quote, repriceThresholdBps),
+			);
+			if (similarOrder) {
+				keptOrders.push(similarOrder);
+			} else {
+				quotesToPlace.push(quote);
+			}
 		} else {
 			quotesToPlace.push(quote);
 		}

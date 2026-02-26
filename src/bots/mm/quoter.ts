@@ -1,15 +1,18 @@
 // Quoter - calculates bid/ask prices with proper precision
 
 import Decimal from "decimal.js";
+import type { FeeConfig } from "./config.js";
 import type { BBO } from "../../sdk/orderbook.js";
 import type { Quote } from "../../types.js";
 import type { QuotingContext } from "./position.js";
+import { log } from "../../utils/logger.js";
 
 export type { Quote } from "../../types.js";
 
 export class Quoter {
 	private readonly tickSize: Decimal;
 	private readonly lotSize: Decimal;
+	private readonly minSpreadBps: number;
 
 	constructor(
 		priceDecimals: number,
@@ -17,16 +20,22 @@ export class Quoter {
 		private readonly spreadBps: number,
 		private readonly takeProfitBps: number,
 		private readonly orderSizeUsd: number,
+		fees: FeeConfig,
 	) {
 		this.tickSize = new Decimal(10).pow(-priceDecimals);
 		this.lotSize = new Decimal(10).pow(-sizeDecimals);
+		this.minSpreadBps = 2 * fees.makerFeeBps;
+		if (spreadBps < this.minSpreadBps) {
+			log.warn(`spreadBps (${spreadBps}) < fee floor (${this.minSpreadBps}bps) — spread will be clamped`);
+		}
 	}
 
 	// Calculate quotes from quoting context, clamped to BBO
 	getQuotes(ctx: QuotingContext, bbo: BBO | null): Quote[] {
 		const { fairPrice, positionState, allowedSides } = ctx;
 		const fair = new Decimal(fairPrice);
-		const bps = positionState.isCloseMode ? this.takeProfitBps : this.spreadBps;
+		const rawBps = positionState.isCloseMode ? this.takeProfitBps : this.spreadBps;
+		const bps = Math.max(rawBps, this.minSpreadBps);
 		const spreadAmount = fair.mul(bps).div(10000);
 
 		// In close mode: limit size to position size

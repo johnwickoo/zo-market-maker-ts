@@ -16,8 +16,10 @@
 //   spread = baseSpread + volMultiplier * volatility + momentumPenalty
 
 import Decimal from "decimal.js";
+import type { FeeConfig } from "./config.js";
 import type { BBO } from "../../sdk/orderbook.js";
 import type { Quote } from "../../types.js";
+import { log } from "../../utils/logger.js";
 
 export interface EnhancedQuoterConfig {
   // Spread
@@ -49,15 +51,22 @@ export interface EnhancedQuotingContext {
 export class EnhancedQuoter {
   private readonly tickSize: Decimal;
   private readonly lotSize: Decimal;
+  private readonly minSpreadBps: number;
 
   constructor(
     priceDecimals: number,
     sizeDecimals: number,
     private readonly config: EnhancedQuoterConfig,
     private readonly orderSizeUsd: number,
+    fees: FeeConfig,
   ) {
     this.tickSize = new Decimal(10).pow(-priceDecimals);
     this.lotSize = new Decimal(10).pow(-sizeDecimals);
+    // Both sides are post-only (maker), so minimum profitable spread = 2 * maker fee
+    this.minSpreadBps = 2 * fees.makerFeeBps;
+    if (config.baseSpreadBps < this.minSpreadBps) {
+      log.warn(`baseSpreadBps (${config.baseSpreadBps}) < fee floor (${this.minSpreadBps}bps) — spread will be clamped`);
+    }
   }
 
   getQuotes(ctx: EnhancedQuotingContext, bbo: BBO | null): Quote[] {
@@ -75,9 +84,10 @@ export class EnhancedQuoter {
     const skewedMid = fair.sub(skewAmount); // Negative skew when long, positive when short
 
     // ─── 2. Volatility-Adaptive Spread ───────────────────────────────
-    // Base spread + volatility component, clamped to [min, max]
+    // Base spread + volatility component, clamped to [fee floor, max]
     let spreadBps = this.config.baseSpreadBps + this.config.volMultiplier * vol;
-    spreadBps = this.clamp(spreadBps, this.config.baseSpreadBps, this.config.maxSpreadBps);
+    const floorBps = Math.max(this.config.baseSpreadBps, this.minSpreadBps);
+    spreadBps = this.clamp(spreadBps, floorBps, this.config.maxSpreadBps);
 
     // ─── 3. Momentum Guard ───────────────────────────────────────────
     // If price is moving up, widen the bid (we're more likely to get

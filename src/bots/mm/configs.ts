@@ -1,6 +1,6 @@
 // Preset configurations for different account sizes and strategies
 
-import type { MarketMakerConfig } from "./config.js";
+import { DEFAULT_FEES, type MarketMakerConfig } from "./config.js";
 
 // ─── $50 Account @ 10x Leverage Configuration ───────────────────────────────
 // Philosophy: Survive first, profit second.
@@ -37,6 +37,8 @@ export const SMALL_ACCOUNT_CONFIG: Omit<MarketMakerConfig, "symbol"> = {
   statusIntervalMs: 2000,
   fairPriceWindowMs: 3 * 60 * 1000, // 3 min window — more responsive to shifts
   positionSyncIntervalMs: 4000,
+  repriceThresholdBps: 2,
+  fees: DEFAULT_FEES,
 };
 
 // Extended risk parameters for the PnL tracker
@@ -68,6 +70,8 @@ export const SMALL_ACCOUNT_AGGRESSIVE: Omit<MarketMakerConfig, "symbol"> = {
   statusIntervalMs: 1000,
   fairPriceWindowMs: 2 * 60 * 1000,
   positionSyncIntervalMs: 3000,
+  repriceThresholdBps: 2,
+  fees: DEFAULT_FEES,
 };
 
 export const SMALL_ACCOUNT_AGGRESSIVE_RISK: RiskConfig = {
@@ -129,6 +133,8 @@ export const ENHANCED_STRATEGY: EnhancedStrategyConfig = {
     statusIntervalMs: 2000,
     fairPriceWindowMs: 3 * 60 * 1000,
     positionSyncIntervalMs: 4000,
+    repriceThresholdBps: 1.5,
+    fees: DEFAULT_FEES,
   },
 
   quoter: {
@@ -184,6 +190,8 @@ export const ENHANCED_AGGRESSIVE: EnhancedStrategyConfig = {
     statusIntervalMs: 1000,
     fairPriceWindowMs: 2 * 60 * 1000,
     positionSyncIntervalMs: 3000,
+    repriceThresholdBps: 1.5,
+    fees: DEFAULT_FEES,
   },
 
   quoter: {
