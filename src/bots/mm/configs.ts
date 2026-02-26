@@ -147,6 +147,7 @@ export const ENHANCED_STRATEGY: EnhancedStrategyConfig = {
     skewFactor: 1.2,           // Moderate skew: shifts mid by 1.2 * posRatio * vol
     maxPositionUsd: 75,        // Position where skew hits maximum (1.5x effective leverage)
     sizeReductionStart: 0.4,   // Start reducing adding-side size at 40% of maxPosition ($30)
+    closeThresholdUsd: 60,     // Hard cap: stop adding side entirely above $60 exposure
 
     // Multi-level (10x leverage provides enough margin for 4 orders)
     levels: 2,                 // 2 orders per side (4 total resting)
@@ -202,6 +203,7 @@ export const ENHANCED_AGGRESSIVE: EnhancedStrategyConfig = {
     skewFactor: 1.0,
     maxPositionUsd: 100,       // 2x effective leverage — aggressive
     sizeReductionStart: 0.5,
+    closeThresholdUsd: 80,     // Hard cap: stop adding side above $80
 
     levels: 3,                 // 3 levels = 6 resting orders — max depth
     levelSpacingBps: 4,

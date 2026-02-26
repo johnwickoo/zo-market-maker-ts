@@ -31,6 +31,7 @@ export interface EnhancedQuoterConfig {
   readonly skewFactor: number;         // How aggressively to skew quotes (0.5-3.0)
   readonly maxPositionUsd: number;     // Position where skew is at maximum
   readonly sizeReductionStart: number; // Position ratio (0-1) where size starts shrinking
+  readonly closeThresholdUsd: number;  // Hard cap: stop adding side entirely above this USD exposure
 
   // Multi-level
   readonly levels: number;             // Number of order levels per side (1-3)
@@ -134,6 +135,12 @@ export class EnhancedQuoter {
 
     // At extreme position (>90%), only quote reducing side
     if (absPositionRatio > 0.9) {
+      if (isLong) bidSizeMult = 0;
+      else askSizeMult = 0;
+    }
+
+    // Hard cap: stop adding side entirely when position exceeds closeThresholdUsd
+    if (Math.abs(positionUsd) >= this.config.closeThresholdUsd) {
       if (isLong) bidSizeMult = 0;
       else askSizeMult = 0;
     }
