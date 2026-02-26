@@ -4,6 +4,8 @@
 
 This bot places buy and sell orders on [01 Exchange](https://01.xyz) (a Solana perpetual futures DEX). It earns profit from the spread between buy and sell prices. When someone trades against your order, the bot automatically places a new order on the opposite side to close the position for a small profit.
 
+The enhanced strategy uses Avellaneda-Stoikov inspired market making with inventory skew, volatility-adaptive spread, momentum guard, and gradual position decay.
+
 ---
 
 ## Step 1: Prerequisites
@@ -60,6 +62,8 @@ If you see a Solana RPC error like `403 Forbidden` (`Your IP or provider is bloc
 RPC_URL=https://your-solana-rpc-endpoint
 ```
 
+Free RPC providers: [Helius](https://helius.dev) (recommended), [QuickNode](https://quicknode.com), or the default Solana public RPC.
+
 ---
 
 ## Step 3: DNS Setup (Important for Some Regions)
@@ -94,176 +98,256 @@ No VPN needed once DNS is fixed.
 ## Step 4: Run the Bot
 
 ```bash
-# Trade ETH
-npm run bot -- eth
+# Build first
+npm run build
 
-# Trade BTC
-npm run bot -- btc
+# Run with a market and profile
+npm run bot -- <SYMBOL> <PROFILE>
+```
 
-# Trade SOL
-npm run bot -- sol
+### Available Profiles
+
+| Profile | Best For | Order Size | Spread | Levels | Description |
+|---------|----------|-----------|--------|--------|-------------|
+| `default` | Testing | $3 | 8 bps | 1 | Minimal config, no risk tracking |
+| `small` | Thin markets | $10 | 8 bps | 1 | Simple strategy, conservative |
+| `aggressive` | Liquid markets | $15 | 6 bps | 1 | Simple strategy, tighter spread |
+| `enhanced` | **Thin markets** | $10 | 8 bps adaptive | 1 | Avellaneda-Stoikov with skew + vol + momentum |
+| `enhanced-aggressive` | **Liquid markets** | $15 | 6 bps adaptive | 2 | Enhanced with multi-level orders |
+
+### Examples
+
+```bash
+# Thin markets — use enhanced (1 level, strong skew)
+npm run bot -- HYPE enhanced
+npm run bot -- SOL enhanced
+
+# Liquid markets — use enhanced-aggressive (2 levels, tighter spread)
+npm run bot -- ETH enhanced-aggressive
+npm run bot -- BTC enhanced-aggressive
 ```
 
 Stop the bot with `Ctrl+C` (it will cancel all open orders before exiting).
 
 ---
 
-## Configuration
+## Strategy Profiles Explained
 
-Edit `src/bots/mm/config.ts` to change settings. Here's what each one does:
+### Enhanced (recommended for most markets)
 
-### Core Settings
+Designed for thin orderbooks. Uses strong inventory skew to mean-revert positions.
 
-| Setting | What It Does | Default |
-|---------|-------------|---------|
-| `spreadBps` | Distance between your buy/sell orders and fair price, in basis points (1 bps = 0.01%). **Wider = safer but fewer fills. Narrower = more fills but riskier.** | `8` |
-| `orderSizeUsd` | How much USD each order is worth. Determines your position size per trade. | `3` |
-| `takeProfitBps` | Spread used when closing a position (close mode). Tighter than normal to close quickly. | `0.1` |
-| `closeThresholdUsd` | When your position value exceeds this, the bot switches to close mode with tighter spread. | `10` |
+- **$10 per order** — slow inventory accumulation, more time two-sided
+- **8 bps base spread** — adaptive: widens in volatile markets, tightens in calm
+- **1 level per side** — no margin waste on thin books
+- **Skew factor 3.0** — aggressively shifts quotes to reduce position
+- **Close mode at $40** — stops adding side entirely above this exposure
+- **Risk limits** — $3 max drawdown, $2 daily loss limit per bot
 
-### Timing Settings
+### Enhanced Aggressive (for BTC/ETH)
 
-| Setting | What It Does | Default |
-|---------|-------------|---------|
-| `warmupSeconds` | Seconds to collect price data before placing first orders. Ensures fair price is accurate. | `10` |
-| `updateThrottleMs` | Minimum milliseconds between order updates. Lower = more responsive but more API calls. | `100` |
-| `orderSyncIntervalMs` | How often to sync order state with the exchange (ms). | `3000` |
-| `statusIntervalMs` | How often to print status line (ms). | `1000` |
-| `fairPriceWindowMs` | Time window for calculating fair price median offset (ms). | `300000` (5 min) |
-| `positionSyncIntervalMs` | How often to sync position data with the exchange (ms). | `5000` |
+Designed for liquid orderbooks where tighter spreads are competitive.
 
-### How the Bot Makes Money
+- **$15 per order** — moderate sizing for liquid markets
+- **6 bps base spread** — tighter to compete for fills
+- **2 levels per side** — captures depth on thick books
+- **Skew factor 2.5** — strong mean-reversion
+- **Close mode at $50** — higher threshold for liquid markets
+- **Risk limits** — $4 max drawdown, $3 daily loss limit per bot
+
+### Multi-Bot Risk Budget ($50 account, 4 bots)
+
+All configs are designed for 4 bots sharing a single $50 account at 10x leverage ($500 buying power):
+
+| Risk Metric | Per Bot (enhanced) | Per Bot (aggressive) | 4 Bots Combined |
+|---|---|---|---|
+| Max Position | $50 | $60 | $200-$240 |
+| Max Drawdown | $3 | $4 | $12-$16 |
+| Daily Loss Limit | $2 | $3 | $8-$12 |
+| Margin Used (max pos) | $5 | $6 | $20-$24 of $50 |
+
+---
+
+## Per-Fill Economics
 
 ```
-1. Bot places BID at $1950 and ASK at $1954 (8 bps spread around $1952 fair price)
-2. Someone sells into your BID → you BUY at $1950
-3. Bot now has a LONG position, places ASK to sell
-4. Someone buys your ASK → you SELL at $1954
-5. Profit: $4 on this round trip (minus fees)
+Enhanced (8 bps spread, $10 orders):
+  Gross per fill:  $10 × 4 bps (half-spread) = $0.004
+  Maker fee:       $10 × 1 bps               = $0.001
+  Net per fill:    $0.003
+  For $1/day:      ~333 fills across all bots (~14/hour)
+
+Enhanced Aggressive (6 bps spread, $15 orders):
+  Gross per fill:  $15 × 3 bps = $0.0045
+  Maker fee:       $15 × 1 bps = $0.0015
+  Net per fill:    $0.003
+  For $1/day:      ~333 fills across all bots (~14/hour)
 ```
 
 ---
 
-## Prebuilt Configs
+## Configuration
 
-Edit the values in `src/bots/mm/config.ts` in the `DEFAULT_CONFIG` object.
+Config presets are in `src/bots/mm/configs.ts`. The main settings:
 
-### Micro: < $100 account (learning/testing)
+### Core Settings
 
-```ts
-export const DEFAULT_CONFIG: Omit<MarketMakerConfig, 'symbol'> = {
-  spreadBps: 10,           // wider spread = safer
-  takeProfitBps: 0.5,      // wider close spread
-  orderSizeUsd: 3,         // tiny orders
-  closeThresholdUsd: 5,    // close positions early
-  warmupSeconds: 10,
-  updateThrottleMs: 200,   // less aggressive updates
-  orderSyncIntervalMs: 3000,
-  statusIntervalMs: 1000,
-  fairPriceWindowMs: 5 * 60 * 1000,
-  positionSyncIntervalMs: 5000,
-}
-```
+| Setting | What It Does |
+|---------|-------------|
+| `spreadBps` | Distance between your buy/sell orders and fair price (1 bps = 0.01%) |
+| `orderSizeUsd` | USD value of each order |
+| `closeThresholdUsd` | Position value where bot stops adding and only reduces |
+| `repriceThresholdBps` | Only cancel+replace orders when price drifts more than this |
+| `fees.makerFeeBps` | Maker fee rate (01 Exchange Tier 1: 1 bps) |
 
-- Risk per trade: ~$3
-- Expected daily volume: low (wide spread = fewer fills)
-- Goal: learn how the bot works without risking much
+### Enhanced Quoter Settings
 
-### Small: < $500 account
+| Setting | What It Does |
+|---------|-------------|
+| `baseSpreadBps` | Minimum spread floor |
+| `maxSpreadBps` | Maximum spread ceiling |
+| `volMultiplier` | How much volatility widens the spread |
+| `skewFactor` | How aggressively to shift quotes toward reducing position |
+| `maxPositionUsd` | Position where skew reaches maximum |
+| `sizeReductionStart` | Position ratio (0-1) where adding-side size starts shrinking |
+| `levels` | Number of order levels per side (1-3) |
+| `momentumPenaltyBps` | Extra spread on adversely-selected side during momentum |
 
-```ts
-export const DEFAULT_CONFIG: Omit<MarketMakerConfig, 'symbol'> = {
-  spreadBps: 8,
-  takeProfitBps: 0.2,
-  orderSizeUsd: 10,
-  closeThresholdUsd: 25,
-  warmupSeconds: 10,
-  updateThrottleMs: 100,
-  orderSyncIntervalMs: 3000,
-  statusIntervalMs: 1000,
-  fairPriceWindowMs: 5 * 60 * 1000,
-  positionSyncIntervalMs: 5000,
-}
-```
+### Risk Settings
 
-- Risk per trade: ~$10
-- Max position before close mode: $25
-- Good balance of safety and activity
-
-### Medium: < $1,000 account
-
-```ts
-export const DEFAULT_CONFIG: Omit<MarketMakerConfig, 'symbol'> = {
-  spreadBps: 6,
-  takeProfitBps: 0.1,
-  orderSizeUsd: 25,
-  closeThresholdUsd: 75,
-  warmupSeconds: 15,
-  updateThrottleMs: 100,
-  orderSyncIntervalMs: 3000,
-  statusIntervalMs: 1000,
-  fairPriceWindowMs: 5 * 60 * 1000,
-  positionSyncIntervalMs: 5000,
-}
-```
-
-- Risk per trade: ~$25
-- Tighter spread = more fills
-- Longer warmup for more accurate fair price
-
-### Large: $10,000+ account
-
-```ts
-export const DEFAULT_CONFIG: Omit<MarketMakerConfig, 'symbol'> = {
-  spreadBps: 5,
-  takeProfitBps: 0.1,
-  orderSizeUsd: 100,
-  closeThresholdUsd: 500,
-  warmupSeconds: 30,
-  updateThrottleMs: 100,
-  orderSyncIntervalMs: 3000,
-  statusIntervalMs: 1000,
-  fairPriceWindowMs: 5 * 60 * 1000,
-  positionSyncIntervalMs: 5000,
-}
-```
-
-- Risk per trade: ~$100
-- Tight spread for maximum fill rate
-- Higher close threshold allows larger positions
-- Longer warmup for stability
+| Setting | What It Does |
+|---------|-------------|
+| `maxDrawdownUsd` | Kill switch: stop all quoting if drawdown exceeds this |
+| `maxPositionUsd` | Hard cap on position size |
+| `dailyLossLimitUsd` | Stop trading for the day if daily PnL drops below this |
 
 ---
 
 ## Reading the Bot Output
 
 ```
-STATUS: pos=0.00150 | bid=[$1947.80x0.0015] | ask=[$1951.00x0.0015]
+STATUS: pos=0.35000 | bid=[$28.21x0.35] | ask=[$28.25x0.35] | pnl=$0.0234 dd=$0.0000 fills=12 vol=$120.50
 ```
-- `pos=0.00150` → You're holding 0.0015 ETH (long)
-- `bid=[$1947.80x0.0015]` → Your buy order: $1947.80, size 0.0015 ETH
-- `ask=[$1951.00x0.0015]` → Your sell order: $1951.00, size 0.0015 ETH
+- `pos=0.35000` → Holding 0.35 HYPE (long)
+- `bid/ask` → Your resting orders with prices and sizes
+- `pnl=$0.0234` → Total PnL this session
+- `dd=$0.0000` → Current drawdown from peak PnL
+- `fills=12` → Number of fills this session
+- `vol=$120.50` → Total volume traded
 
 ```
-FILL: BUY 0.0015 @ $1949.80
+FILL: BUY 0.35 @ $28.21
+PNL: realized=$0.0012 | total=$0.0234 | dd=$0.0000
 ```
-- Someone traded against your buy order. You now have a position.
+- A fill occurred. PnL tracker shows realized profit from this fill.
 
 ```
-POS: LONG 0.001500 ($2.92)
+POS: LONG 0.350000 ($9.87) [CLOSE MODE]
 ```
-- Your current position: long 0.0015 ETH worth $2.92
+- Position is above close threshold — only quoting the reducing side.
 
 ```
-QUOTE: BID $1947.80 | ASK $1951.00 | FAIR $1949.36 | SPREAD 8bps | NORMAL
+ENHANCED: inv=65% vol=0.8bps mom=-0.1bps skew=1.6bps
 ```
-- The bot's calculated prices. NORMAL = regular quoting. CLOSE = closing a position.
+- `inv=65%` → Position is 65% of max
+- `vol=0.8bps` → Current 1-min realized volatility
+- `mom=-0.1bps` → Slight downward momentum
+- `skew=1.6bps` → Mid price shifted 1.6 bps to reduce position
+
+```
+RISK HALT: Max drawdown breached: $3.12 >= $3.00
+```
+- Risk limit hit — bot cancels all orders and stops quoting.
+
+---
+
+## VPS Deployment
+
+For 24/7 operation, deploy to a VPS (1 CPU / 1 GB RAM is enough for 4 bots).
+
+### Setup
+
+```bash
+# Install Node.js 25 on Ubuntu
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+source ~/.bashrc
+nvm install 25
+nvm use 25
+
+# Install system dependency (needed on some Ubuntu versions)
+apt install -y libatomic1
+
+# Install pm2 (process manager)
+npm install -g pm2
+```
+
+### First Deploy (from your Mac)
+
+```bash
+# Copy repo to VPS (excludes node_modules — will install fresh on server)
+rsync -av --exclude node_modules --exclude .env ~/zo-market-maker-ts/ root@YOUR_VPS_IP:~/zo-market-maker-ts/
+
+# SSH in and set up
+ssh root@YOUR_VPS_IP
+cd ~/zo-market-maker-ts
+nano .env          # Add your PRIVATE_KEY and RPC_URL
+npm install
+npm run build
+```
+
+### Start Bots with pm2
+
+```bash
+# Thin markets
+pm2 start npm --name "mm-hype" -- run bot -- HYPE enhanced
+pm2 start npm --name "mm-sol"  -- run bot -- SOL enhanced
+
+# Liquid markets
+pm2 start npm --name "mm-eth"  -- run bot -- ETH enhanced-aggressive
+pm2 start npm --name "mm-btc"  -- run bot -- BTC enhanced-aggressive
+
+# Auto-restart on server reboot
+pm2 startup
+pm2 save
+```
+
+### pm2 Commands
+
+```bash
+pm2 status            # See all bots
+pm2 logs              # Tail all logs
+pm2 logs mm-hype      # Tail specific bot
+pm2 stop mm-hype      # Stop a bot (keeps in list)
+pm2 restart mm-hype   # Restart a bot
+pm2 delete mm-hype    # Remove from pm2 entirely
+pm2 restart all       # Restart all bots
+pm2 stop all          # Stop all bots
+```
+
+### Deploy Updates (from your Mac)
+
+```bash
+# Sync code changes to VPS
+rsync -av --exclude node_modules --exclude .env ~/zo-market-maker-ts/ root@YOUR_VPS_IP:~/zo-market-maker-ts/
+
+# Build and restart on VPS
+ssh root@YOUR_VPS_IP "cd ~/zo-market-maker-ts && npm run build && pm2 restart all"
+```
+
+Or add a shortcut to your `~/.zshrc`:
+```bash
+alias deploy-mm='rsync -av --exclude node_modules --exclude .env ~/zo-market-maker-ts/ root@YOUR_VPS_IP:~/zo-market-maker-ts/ && ssh root@YOUR_VPS_IP "cd ~/zo-market-maker-ts && npm run build && pm2 restart all"'
+```
+
+Then just run `deploy-mm` after making changes.
 
 ---
 
 ## Risks
 
 - **Market risk**: If price moves sharply against your position before the bot can close it, you lose money
-- **The bot is NOT guaranteed to be profitable** - it depends on market conditions, spread, and fill rate
+- **Inventory risk**: One-sided fills accumulate directional exposure — the #1 risk for small accounts
+- **The bot is NOT guaranteed to be profitable** — it depends on market conditions, spread, and fill rate
 - **Start small**, understand the behavior, then scale up
 - **Never risk money you can't afford to lose**
+- **Risk limits** (drawdown, daily loss) are your safety net — don't disable them
