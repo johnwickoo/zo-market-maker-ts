@@ -139,7 +139,8 @@ export const ENHANCED_STRATEGY: EnhancedStrategyConfig = {
     volMultiplier: 0.8,        // Mild vol scaling — let skew handle inventory, not spread
 
     // Inventory — strong skew is the primary risk control
-    skewFactor: 3.0,           // Aggressive skew: at 0.8 bps vol, 80% inventory → 1.9 bps shift
+    skewFactor: 3.0,           // Aggressive skew: at 3bps effective vol, 25% inv → 2.25bps shift
+    minSkewBps: 3.0,           // Floor: skew acts as if vol >= 3bps even in calm markets
     maxPositionUsd: 75,        // 1.5x real equity — skew hits max here
     sizeReductionStart: 0.3,   // Start reducing adding side at 30% ($22.50 position)
     closeThresholdUsd: 60,     // Hard cap: stop adding side entirely above $60
@@ -195,6 +196,7 @@ export const ENHANCED_AGGRESSIVE: EnhancedStrategyConfig = {
     volMultiplier: 0.8,
 
     skewFactor: 2.5,           // Strong skew
+    minSkewBps: 3.0,           // Floor: skew effective even in calm markets
     maxPositionUsd: 100,       // 2x real equity
     sizeReductionStart: 0.3,
     closeThresholdUsd: 75,

@@ -29,6 +29,7 @@ export interface EnhancedQuoterConfig {
 
   // Inventory management
   readonly skewFactor: number;         // How aggressively to skew quotes (0.5-3.0)
+  readonly minSkewBps: number;         // Minimum vol floor for skew calc (ensures skew works in calm markets)
   readonly maxPositionUsd: number;     // Position where skew is at maximum
   readonly sizeReductionStart: number; // Position ratio (0-1) where size starts shrinking
   readonly closeThresholdUsd: number;  // Hard cap: stop adding side entirely above this USD exposure
@@ -80,7 +81,9 @@ export class EnhancedQuoter {
     // Short → shift up (higher bids, higher asks → eager to buy)
     const positionRatio = this.clamp(positionUsd / this.config.maxPositionUsd, -1, 1);
     const vol = volatilityBps ?? this.config.baseSpreadBps; // Fallback to base spread if vol not ready
-    const skewBps = this.config.skewFactor * positionRatio * vol;
+    // Use max(vol, minSkewBps) so skew stays strong even in calm markets
+    const skewVol = Math.max(vol, this.config.minSkewBps);
+    const skewBps = this.config.skewFactor * positionRatio * skewVol;
     const skewAmount = fair.mul(skewBps).div(10000);
     const skewedMid = fair.sub(skewAmount); // Negative skew when long, positive when short
 
@@ -213,7 +216,9 @@ export class EnhancedQuoter {
     const posRatio = (ctx.positionUsd / this.config.maxPositionUsd * 100).toFixed(0);
     const vol = ctx.volatilityBps?.toFixed(1) ?? "--";
     const mom = ctx.momentumBps.toFixed(1);
-    const skew = (this.config.skewFactor * this.clamp(ctx.positionUsd / this.config.maxPositionUsd, -1, 1) * (ctx.volatilityBps ?? this.config.baseSpreadBps)).toFixed(1);
+    const diagVol = ctx.volatilityBps ?? this.config.baseSpreadBps;
+    const diagSkewVol = Math.max(diagVol, this.config.minSkewBps);
+    const skew = (this.config.skewFactor * this.clamp(ctx.positionUsd / this.config.maxPositionUsd, -1, 1) * diagSkewVol).toFixed(1);
     return `inv=${posRatio}% vol=${vol}bps mom=${mom}bps skew=${skew}bps`;
   }
 
