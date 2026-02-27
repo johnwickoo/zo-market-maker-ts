@@ -27,7 +27,7 @@ import { DEFAULT_FEES, type MarketMakerConfig } from "./config.js";
 
 export const SMALL_ACCOUNT_CONFIG: Omit<MarketMakerConfig, "symbol"> = {
   spreadBps: 8,                // 0.08% — competitive but covers fees + profit
-  takeProfitBps: 2,            // 0.02% — tight close spread for quick unwind
+  takeProfitBps: 0.5,           // 0.005% — close near mid for fast unwind (matches dev's $100 challenge)
   orderSizeUsd: 15,            // $15 per side — good volume without excessive inventory
   closeThresholdUsd: 60,       // Enter close mode at $60 exposure
   warmupSeconds: 15,
@@ -59,7 +59,7 @@ export const SMALL_ACCOUNT_RISK: RiskConfig = {
 // Tighter spread for liquid markets (BTC, ETH). More fills, more risk.
 export const SMALL_ACCOUNT_AGGRESSIVE: Omit<MarketMakerConfig, "symbol"> = {
   spreadBps: 6,                // 0.06% — tighter spread, more fills
-  takeProfitBps: 1,            // 0.01% — aggressive close
+  takeProfitBps: 0.5,           // 0.005% — close near mid for fast unwind
   orderSizeUsd: 20,            // $20 per side — aggressive for volume
   closeThresholdUsd: 75,       // Higher threshold
   warmupSeconds: 10,
@@ -119,7 +119,7 @@ export interface EnhancedStrategyConfig {
 export const ENHANCED_STRATEGY: EnhancedStrategyConfig = {
   base: {
     spreadBps: 8,              // Used as fallback; enhanced quoter overrides
-    takeProfitBps: 2,          // Used as fallback
+    takeProfitBps: 0.5,         // Close near mid for fast unwind
     orderSizeUsd: 15,          // $15 per fill — good volume, 4 fills to close mode
     closeThresholdUsd: 60,     // Hard cap: stop adding side above $60 exposure
     warmupSeconds: 15,
@@ -177,7 +177,7 @@ export const ENHANCED_STRATEGY: EnhancedStrategyConfig = {
 export const ENHANCED_AGGRESSIVE: EnhancedStrategyConfig = {
   base: {
     spreadBps: 6,
-    takeProfitBps: 1,
+    takeProfitBps: 0.5,
     orderSizeUsd: 20,          // $20 per fill — aggressive for volume
     closeThresholdUsd: 75,
     warmupSeconds: 10,

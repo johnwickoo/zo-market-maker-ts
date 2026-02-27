@@ -16,9 +16,10 @@ export interface FairPriceProvider {
 
 // Offset-median fair price calculator
 // fair_price = reference_mid + median(local_mid - reference_mid)
-// Creates per-second offset samples and takes median over configurable window
+// Samples at 200ms resolution (5x more granular than 1-per-second)
 
-const MAX_SAMPLES = 500; // 5 minutes * 60 seconds + buffer
+const SAMPLE_INTERVAL_MS = 200; // One sample per 200ms slot
+const MAX_SAMPLES = 2500; // 5 minutes * (1000/200) slots/sec + buffer
 
 export interface FairPriceConfig {
 	readonly windowMs: number; // Time window for samples (5 min = 300,000ms)
@@ -27,7 +28,7 @@ export interface FairPriceConfig {
 
 interface OffsetSample {
 	offset: number; // zo_mid - binance_mid
-	second: number; // Unix second (timestamp / 1000 floored)
+	slot: number; // Time slot: Math.floor(timestamp / SAMPLE_INTERVAL_MS)
 }
 
 export class FairPriceCalculator implements FairPriceProvider {
@@ -35,25 +36,25 @@ export class FairPriceCalculator implements FairPriceProvider {
 	private samples: OffsetSample[] = [];
 	private head = 0; // Next write position
 	private count = 0; // Actual sample count
-	private lastSecond = 0; // Last recorded second
+	private lastSlot = 0; // Last recorded time slot
 
 	constructor(private readonly config: FairPriceConfig) {}
 
-	// Add a new sample when both prices are available (once per second)
+	// Add a new sample when both prices are available (once per 200ms slot)
 	addSample(localMid: number, referenceMid: number): void {
 		const now = Date.now();
-		const currentSecond = Math.floor(now / 1000);
+		const currentSlot = Math.floor(now / SAMPLE_INTERVAL_MS);
 
-		// Only record one sample per second
-		if (currentSecond <= this.lastSecond) {
+		// One sample per 200ms slot
+		if (currentSlot <= this.lastSlot) {
 			return;
 		}
-		this.lastSecond = currentSecond;
+		this.lastSlot = currentSlot;
 
 		const offset = localMid - referenceMid;
 
 		// Write to circular buffer
-		this.samples[this.head] = { offset, second: currentSecond };
+		this.samples[this.head] = { offset, slot: currentSlot };
 		this.head = (this.head + 1) % MAX_SAMPLES;
 		if (this.count < MAX_SAMPLES) {
 			this.count++;
@@ -62,12 +63,12 @@ export class FairPriceCalculator implements FairPriceProvider {
 
 	// Get samples within time window
 	private getValidSamples(): OffsetSample[] {
-		const cutoffSecond = Math.floor((Date.now() - this.config.windowMs) / 1000);
+		const cutoffSlot = Math.floor((Date.now() - this.config.windowMs) / SAMPLE_INTERVAL_MS);
 		const valid: OffsetSample[] = [];
 
 		for (let i = 0; i < this.count; i++) {
 			const sample = this.samples[i];
-			if (sample && sample.second > cutoffSecond) {
+			if (sample && sample.slot > cutoffSlot) {
 				valid.push(sample);
 			}
 		}
